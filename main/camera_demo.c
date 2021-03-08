@@ -150,12 +150,15 @@ We then do another short sleep after wifi to see how much battery that costs us
 /* Threshold above which we try to do a wifi */
 #define WIFI_THRESHOLD_MV 4400
 
+/* Wake once per minute */
+#define SHORT_SLEEP_SEC 60
 
+/* 10 minutes */
+#define LONG_SLEEP_SEC 10*60
 
-#define SHORT_SLEEP_SEC 120
-
-/* Otherwise, wake every 30 minutes and don't publish */
-#define LONG_SLEEP_SEC 30*60
+/* In order to say we've gained/maintained charge, we need to have at least
+ * this much more voltage */
+#define VOLTAGE_INCREASE_MARGIN_MV 50
 
 
 /* Publishing occurs when we startup above the threshold */
@@ -605,7 +608,7 @@ void app_main(void)
         if(voltage_at_startup >= min_voltage_threshold)
         {
             ESP_LOGI(TAG,"Did short sleep and maintained/gained voltage; do another short sleep");
-            min_voltage_threshold = voltage_at_startup + (voltage_at_startup / 10); // Needs to increase by 1/10
+            min_voltage_threshold = voltage_at_startup + VOLTAGE_INCREASE_MARGIN_MV;
             go_to_sleep(SHORT_SLEEP_SEC);
         }
         else

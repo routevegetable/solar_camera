@@ -29,6 +29,7 @@ import socketserver
 import io
 import cgi
 from datetime import datetime
+from datetime import timezone
 from datetime import timedelta
 import urllib
 import struct
@@ -74,7 +75,7 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             temp = int(qs.get('t',[-1])[0])
             hum = int(qs.get('h',[-1])[0])
             volts = int(qs.get('v',[-1])[0])
-            filename = "{}/{}_T{}_H{}_V{}.jpg".format(IMAGE_DIR, datetime.now().timestamp(), temp, hum, volts)
+            filename = "{}/{}_T{}_H{}_V{}.jpg".format(IMAGE_DIR, datetime.now(timezone.utc).timestamp(), temp, hum, volts)
 
             with open(filename, "wb") as f:
                 f.write(self.rfile.read(content_length))
@@ -94,7 +95,7 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             uptime = int(qs.get('t')[0])
 
             # Real time the sensor started
-            start_time = datetime.now() - timedelta(seconds=uptime)
+            start_time = datetime.now(timezone.utc) - timedelta(seconds=uptime)
 
             with open(DATA_FILE, "a") as f:
                 for r_time, r_voltage, r_temperature, r_humidity in records:
@@ -102,7 +103,7 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     # Real time this reading was made
                     time2 = start_time + timedelta(seconds=r_time)
 
-                    line = "{},{},{},{}\n".format(time2.isoformat().replace("T", " "), r_voltage, r_temperature, r_humidity)
+                    line = "{},{},{},{}\n".format(time2.isoformat().replace("T", " ").replace("+00:00",""), r_voltage, r_temperature, r_humidity)
 
                     print("New record: {}".format(line))
 
