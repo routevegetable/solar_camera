@@ -55,6 +55,10 @@ static esp_pm_lock_handle_t pm_lock;
 /* DHT-11 sensor */
 #define DHT_GPIO 15
 
+/* Number of times to read the DHT sensor when logging data.
+ * first read seems to produce a stale value */
+#define DHT_NEEDED_READS 2
+
 /* ADC for battery voltage measurement */
 #define ADC_GPIO 13
 #define ADC_UNIT ADC_UNIT_2
@@ -131,44 +135,33 @@ static camera_config_t camera_config = {
 };
 
 
-/*
-Power strategy:
-  If we start up and have more than WIFI_THRESHOLD_MV on the battery,
-  we attempt wifi, set a min_voltage_threshold of 0, then do a short sleep.
-Otherwise:
-  If we wake up and have a voltage >= min_voltage_threshold, we set it to our
-   current voltage, and do a short sleep.
-  If we wake up and have a voltage < min_voltage_threshold, we set that to +inf and do a long sleep.
-   - thus, we are stuck in long sleep mode until wifi is possible again.
-
-If we don't have another wifi left when we wake up, we do another short sleep
-to see how much that costs us without a wifi.
-If we didn't lose voltage, we keep doing that.
-If we lost voltage, we go into
-We then do another short sleep after wifi to see how much battery that costs us
-*/
-/* Threshold above which we try to do a wifi */
+/* If we wake with more than this voltage, do a wifi publish. */
 #define WIFI_THRESHOLD_MV 4400
 
-/* Wake once per minute */
-#define SHORT_SLEEP_SEC 60
+/* If not, we measure whether we lost or gained charge since
+   last sleep. This measurement includes the cost to start up */
+RTC_DATA_ATTR uint16_t voltage_at_last_sleep;
 
-/* 10 minutes */
-#define LONG_SLEEP_SEC 10*60
-
-/* In order to say we've gained/maintained charge, we need to have at least
- * this much more voltage */
+/* We only call it gaining voltage if we have more than this much more */
 #define VOLTAGE_INCREASE_MARGIN_MV 50
 
+/* If we gain voltage, we sleep for the same time as last time
+ * If we lose voltage, we sleep for the same time as last time * 2.
+ * As we keep waking to find we lost voltage, we keep doubling the sleep time
+ * until it starts going up again.
+ * Once we hit the wifi threshold, we start sleeping for the
+ * minimum sleep time again. */
+RTC_DATA_ATTR uint32_t sleep_sec;
+#define MIN_SLEEP_SEC 60
+#define MAX_SLEEP_SEC 32*60
 
-/* Publishing occurs when we startup above the threshold */
-static uint16_t voltage_at_startup;
-
-/* If we wake up with less than this, we go into long sleep mode. */
-RTC_DATA_ATTR uint16_t min_voltage_threshold;
+/* If we find ourselves at max sleep time with power still dropping,
+ * try for an upload. Don't waste power on the camera.*/
+bool yolo_mode = false;
 
 /* Historical records */
 #define HISTORY_SIZE 256  /* 2kB history */
+
 
 /* 8 bytes */
 struct data_record_t
@@ -216,16 +209,28 @@ static void log_data(void)
 {
     struct dht11_reading dht;
 
-    for(int i = 0; i < 3; i++)
+    int good_reads = 0;
+    for(int i = 0; i < 5 && good_reads < DHT_NEEDED_READS; i++)
     {
         dht = DHT11_read();
 
         if(dht.temperature != 255 && dht.temperature != 0)
-            break;
+        {
+            good_reads++;
+            ESP_LOGI(TAG, "Got good DHT reading %d/%d", good_reads, DHT_NEEDED_READS);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "DHT read failed; trying again");
+        }
 
-        ESP_LOGW(TAG, "DHT read failed; trying again");
+        vTaskDelay(1000/portTICK_PERIOD_MS);
+    }
 
-        vTaskDelay(500/portTICK_PERIOD_MS);
+    if(good_reads < DHT_NEEDED_READS)
+    {
+        ESP_LOGW(TAG, "Giving up on DHT");
+        return;
     }
 
     if(history_ptr == HISTORY_SIZE)
@@ -455,22 +460,25 @@ static void snap_task(void* arg)
     bool camera_up = false;
 
 
-    /* Don't light sleep - it breaks the camera */
-    esp_pm_lock_acquire(pm_lock);
-
-    for(int i = 0; i < CAM_MAX_TRIES && !camera_up; i++)
+    if(!yolo_mode) // Don't try to do camera stuff in yolo mode
     {
-        ESP_LOGI(TAG, "Init camera...");
-        if((e = esp_camera_init(&camera_config)) != ESP_OK)
+        /* Don't light sleep - it breaks the camera */
+        esp_pm_lock_acquire(pm_lock);
+
+        for(int i = 0; i < CAM_MAX_TRIES && !camera_up; i++)
         {
-            ESP_LOGE(TAG, "Error %d initializing camera", e);
-            /* Retry */
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Camera initialized");
-            /* Camera now initialized */
-            camera_up = true;
+            ESP_LOGI(TAG, "Init camera...");
+            if((e = esp_camera_init(&camera_config)) != ESP_OK)
+            {
+                ESP_LOGE(TAG, "Error %d initializing camera", e);
+                /* Retry */
+            }
+            else
+            {
+                ESP_LOGI(TAG, "Camera initialized");
+                /* Camera now initialized */
+                camera_up = true;
+            }
         }
     }
 
@@ -508,9 +516,11 @@ static void snap_task(void* arg)
         camera_off();
     }
 
-    /* Done now - can go to sleep all we want */
-    esp_pm_lock_release(pm_lock);
-
+    if(!yolo_mode) // We don't lock light sleep in yolo mode
+    {
+        /* Done now - can go to sleep all we want */
+        esp_pm_lock_release(pm_lock);
+    }
 
     log_data();
 
@@ -539,8 +549,8 @@ static void snap_task(void* arg)
     /* Phew - done! */
 
     /* Zzzz */
-    min_voltage_threshold = 0;
-    go_to_sleep(SHORT_SLEEP_SEC);
+    voltage_at_last_sleep = history[history_ptr-1].voltage;
+    go_to_sleep(sleep_sec);
 }
 
 static void setup_gpio(void)
@@ -594,38 +604,58 @@ void app_main(void)
         tv.tv_usec = 0;
         settimeofday(&tv, NULL);
         history_ptr = 0;
-        min_voltage_threshold = 0;
+        voltage_at_last_sleep = 0;
+        sleep_sec = MIN_SLEEP_SEC;
     }
 
     log_data();
 
-    voltage_at_startup = history[history_ptr-1].voltage;
+    uint16_t voltage_at_startup = history[history_ptr-1].voltage;
+
 
     ESP_LOGI(TAG, "Battery voltage: %dmV; Wifi Threshold: %dmV", voltage_at_startup, WIFI_THRESHOLD_MV);
 
     if(voltage_at_startup < WIFI_THRESHOLD_MV)
     {
-        if(voltage_at_startup >= min_voltage_threshold)
+        int16_t voltage_change = (int16_t)voltage_at_startup - (int16_t)voltage_at_last_sleep;
+
+        ESP_LOGI(TAG,"Voltage change: %dmV", voltage_change);
+
+        if(voltage_change > VOLTAGE_INCREASE_MARGIN_MV)
         {
-            ESP_LOGI(TAG,"Did short sleep and maintained/gained voltage; do another short sleep");
-            min_voltage_threshold = voltage_at_startup + VOLTAGE_INCREASE_MARGIN_MV;
-            go_to_sleep(SHORT_SLEEP_SEC);
+            /* Gained enough voltage - we're good with the current sleep time */
+            voltage_at_last_sleep = voltage_at_startup;
+            go_to_sleep(sleep_sec);
         }
         else
         {
-            ESP_LOGI(TAG, "Long sleep / low power");
-            /* Stay in long sleep mode even if we gain voltage,
-             * until we have enough for wifi - this prevents useless oscillation
-             * which stops us from getting to wifi voltage */
-            min_voltage_threshold = UINT16_MAX;
-            go_to_sleep(LONG_SLEEP_SEC);
+            if(sleep_sec < MAX_SLEEP_SEC)
+            {
+                sleep_sec = sleep_sec * 2;
+
+                /* Sleep twice as long this time */
+                ESP_LOGI(TAG, "Lost voltage");
+
+                go_to_sleep(sleep_sec);
+            }
+            else
+            {
+                /* We lost voltage and there's nothing we can do about it
+                 * Try for an upload.
+                 */
+                ESP_LOGI(TAG, "Lost voltage even though we maxed sleep time. YOLO MODE");
+                yolo_mode = true;
+            }
         }
     }
     else
     {
-        /* Ensure the next sleep we do is a short one */
-        min_voltage_threshold = 0;
+        /* We're doing full wifi - sleep for a short time after this */
+        sleep_sec = MIN_SLEEP_SEC;
     }
+
+    /* If we find ourselves still losing voltage after maxing out sleep time,
+     * Do a publish - we're probably done for the day */
 
     /* GO GO GO!!! */
 
