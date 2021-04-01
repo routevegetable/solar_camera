@@ -20,7 +20,7 @@
 #include <time.h>
 #include <assert.h>
 
-#include <dht11.h>
+#include <dht.h>
 
 #include <driver/adc_common.h>
 
@@ -52,7 +52,7 @@ static esp_pm_lock_handle_t pm_lock;
 #define HTTP_DATA_PATH "/data"
 #define HTTP_TIMEOUT_SEC 10
 
-/* DHT-11 sensor */
+/* DHT-22 sensor */
 #define DHT_GPIO 15
 
 /* Number of times to read the DHT sensor when logging data.
@@ -160,7 +160,7 @@ RTC_DATA_ATTR uint32_t sleep_sec;
 bool yolo_mode = false;
 
 /* Historical records */
-#define HISTORY_SIZE 256  /* 2kB history */
+#define HISTORY_SIZE 64  /* 2kB history */
 
 
 /* 8 bytes */
@@ -168,8 +168,8 @@ struct data_record_t
 {
     uint32_t time;
     uint16_t voltage;
-    uint8_t temperature;
-    uint8_t humidity;
+    float temperature;
+    float humidity;
 };
 
 RTC_DATA_ATTR struct data_record_t history[HISTORY_SIZE];
@@ -207,14 +207,14 @@ static uint32_t read_batt_voltage(void)
 
 static void log_data(void)
 {
-    struct dht11_reading dht;
+    struct dht_reading dht;
 
     int good_reads = 0;
     for(int i = 0; i < 5 && good_reads < DHT_NEEDED_READS; i++)
     {
-        dht = DHT11_read();
+        dht = DHT_read();
 
-        if(dht.temperature != 255 && dht.temperature != 0)
+        if(dht.temperature != 255 && dht.temperature != 0 && dht.status = DHT_OK)
         {
             good_reads++;
             ESP_LOGI(TAG, "Got good DHT reading %d/%d", good_reads, DHT_NEEDED_READS);
@@ -243,14 +243,14 @@ static void log_data(void)
 
     h->time = (uint32_t)time(NULL);
     h->voltage = (uint16_t)read_batt_voltage();
-    h->temperature = (uint8_t)dht.temperature;
-    h->humidity = (uint8_t)dht.humidity;
+    h->temperature = dht.temperature;
+    h->humidity = dht.humidity;
 
-    ESP_LOGI(TAG, "Logging: time = %d voltage = %d, temperature = %d, humidity = %d",
+    ESP_LOGI(TAG, "Logging: time = %d voltage = %d, temperature = %f, humidity = %f",
              (int)h->time,
              (int)h->voltage,
-             (int)h->temperature,
-             (int)h->humidity);
+             h->temperature,
+             h->humidity);
 }
 
 
@@ -593,7 +593,7 @@ void app_main(void)
 
     camera_off();
 
-    DHT11_init(DHT_GPIO);
+    DHT_init(DHT_GPIO, MODE_DHT22);
 
     if(esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED)
     {
