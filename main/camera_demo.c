@@ -57,7 +57,7 @@ static esp_pm_lock_handle_t pm_lock;
 
 /* Number of times to read the DHT sensor when logging data.
  * first read seems to produce a stale value */
-#define DHT_NEEDED_READS 2
+#define DHT_NEEDED_READS 1
 
 /* ADC for battery voltage measurement */
 #define ADC_GPIO 13
@@ -214,7 +214,7 @@ static void log_data(void)
     {
         dht = DHT_read();
 
-        if(dht.temperature != 255 && dht.temperature != 0 && dht.status = DHT_OK)
+        if(dht.temperature != 255 && dht.temperature != 0 && dht.status == DHT_OK)
         {
             good_reads++;
             ESP_LOGI(TAG, "Got good DHT reading %d/%d", good_reads, DHT_NEEDED_READS);
@@ -258,7 +258,7 @@ static void log_data(void)
 /* Deep sleep for some number of seconds */
 static void go_to_sleep(uint32_t sleep_secs)
 {
-    ESP_LOGI(TAG, "Startup voltage %dmV - sleeping for %d seconds", voltage_at_startup, sleep_secs);
+    ESP_LOGI(TAG, "Sleeping for %d seconds", sleep_secs);
 
     /* Clear any wakeup timers which might be on */
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -375,7 +375,7 @@ static void upload_image(camera_fb_t *fb)
     static char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
 
     char q_buff[100];
-    snprintf(q_buff, 100, "t=%d&h=%d&v=%d&l=%zu",
+    snprintf(q_buff, 100, "t=%f&h=%f&v=%d&l=%zu",
              history[history_ptr-1].temperature,
              history[history_ptr-1].humidity,
              history[history_ptr-1].voltage,
@@ -593,7 +593,10 @@ void app_main(void)
 
     camera_off();
 
-    DHT_init(DHT_GPIO, MODE_DHT22);
+    //DHT_init(DHT_GPIO, MODE_DHT22);
+    DHT22_init(DHT_GPIO);
+
+    ESP_ERROR_CHECK(nvs_flash_init());
 
     if(esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED)
     {
@@ -666,7 +669,6 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
 
-    ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
